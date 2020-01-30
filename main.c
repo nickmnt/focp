@@ -3,10 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "beep.h"
-
-//CUSTOM BEEP
 #include <alsa/asoundlib.h>
-int abeep(double frequency, double duration);
 
 /*
 ==========================
@@ -52,12 +49,24 @@ ut.note-of................
 								FEATURES
 						========================
 						1.Clean code(comment,functions)
-						2.Complete user interface
-						3.Custom beep
+						2.Complete friendly colorful user interface
+						3.Custom beep implemented
 						4.Git:https://github.com/nimamt/focp
-						
+						5.Skipping overlapping notes
+						6.Handling midi file errors
+						7.Handling incompatible files
+
 ===========================================================================
 								
+===========================================================================
+						   DOCUMENTARIES USED
+						========================
+1.https://www.mobilefish.com/tutorials/midi/midi_quickguide_specification.html
+2.http://www.somascape.org/midi/tech/mfile.html
+3.‫‪https://www.csie.ntu.edu.tw/~r92092/ref/midi‬‬
+4.‫‪http://www.music.mcgill.ca/~ich/classes/mumt306/StandardMIDIfileformat.html‬‬
+5.‫‪https://en.m.wikipedia.org/wiki/Variable-length_quantity‬‬
+===========================================================================
 */
 
 /* Constant haye barname */
@@ -102,6 +111,7 @@ typedef struct
 {
 	event_type type;
 	double deltaTime_ms; 		//Delta time in milliseconds
+	unsigned char note;
 	double frequency; 			//Frequency duration va start_ticks faghat baraye event_type type == NOTE hastan!
 	double duration;
 	int start_ticks; 			//Start of note on 
@@ -118,14 +128,24 @@ typedef struct
 
 /* Prototype haye barname */
 
-int get_bytes(FILE *midi_file, int n); 		  //Function komaki baraye gereftan addad n bytie ke hadaxar n 4 hast
-int get_vlv(FILE* midi_file, int* bytesRead); //Function baraye fread kardan Variable Length Value 
-double note_to_freq(int note);                //Function baraye tabdil note 0-127 be frequency moadelesh
+//Normal functions
+int get_bytes(FILE *midi_file, int n); 		          //Function komaki baraye gereftan addad n bytie ke hadaxar n 4 hast
+int get_vlv(FILE* midi_file, int* bytesRead);         //Function baraye fread kardan Variable Length Value 
+double note_to_freq(int note);                        //Function baraye tabdil note 0-127 be frequency moadelesh
 int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *current_time, int * bytesRead); //Function baraye proccess kardan Event haye yek track
-void play_tracks(track tracks[], int count);  //Function baraye pakhsh kardan note haye kol track haye yek file midi
-int proccess_midi_file(char file_name[]);	  //Function asli baraye proccess kardan yek file midi ba address file_name
+void play_tracks(track tracks[], int count);          //Function baraye pakhsh kardan note haye kol track haye yek file midi
+void save_tracks_asnotes(track tracks[], int count);  //Function baraye save kardan file midi besurate notes baraye ejrae phase1
+int proccess_midi_file(char file_name[]);	          //Function asli baraye proccess kardan yek file midi ba address file_name
+double note_to_freq(int note);				          //Tabdil note 0-127 be frequency moadelesh
+const char* note_to_name(int note);			          //Tabdil note 12-119 be note moadelesh
+void playnotes();									  //Phase1
+float getfrequency(char target_note[]);				  //Phase1
+void getuc(char* ch, FILE* midi_file);				  //Exception handling added to file read byte
 
-//TEXT UI FUNCTIONS
+//Custom beep
+int abeep(double frequency, double duration); //Beep customi ke khodam ba hamun lib alsa sakhtam! :)
+
+//Text UI functions
 void text_ui_inititialize(); 				  //Initialization Function for ~~Text UI~~ ^_^
 void text_ui_draw_menu(); 					  //Option haye menu ro chap kon ta karbar bebine
 void text_ui_proccess_command(); 			  //User input ro handle kon
@@ -140,6 +160,7 @@ int main()
 
 void text_ui_draw_menu()
 {
+	//Menu UI hast
 	printf("%s~~MIDI FILE PLAYER (with user interface!)~~%s\n", KMAG, KBLU); //Printf %s KMAG rang terminal ro be magneta taghiir mide %s KBLUE be blue
 	printf("0.Play a single midi file\n");
 	printf("====Playlist Functions====\n");
@@ -265,7 +286,7 @@ void text_ui_proccess_command()
 		}
 		if(command == 8)
 		{
-			printf("Music folder path(with slash at end):");
+			printf("Music folder path(ba slash dar akhar):");
 			scanf(" %s", folder_path);
 		}
 		if(command == 9)
@@ -285,8 +306,8 @@ void text_ui_proccess_command()
 			FILE* playlist_file = fopen("playlist.txt", "w");
 			for(i=0; i<filecount; i++)
 			{
-				fputs(playlist[i], playlist_file);
-				fprintf(playlist_file, "\n");
+				fputs(playlist[i], playlist_file);			//i+1th file ro be playlist ezafe kon 
+				fprintf(playlist_file, "\n");				//Baraye khundan ayande ba newline jodashun kon
 			}
 			fclose(playlist_file);
 		}
@@ -296,7 +317,7 @@ void text_ui_proccess_command()
 			FILE* playlist_file = fopen("playlist.txt", "r");
 			while (fgets(playlist[filecount], MAX_FILENAME_SIZE, playlist_file))
 			{
-				playlist[filecount][strlen(playlist[filecount])-1] = '\0'; //Hazf character \n az akhar
+				playlist[filecount][strlen(playlist[filecount])-1] = '\0'; //Hazf character \n az akhar, chon \n be onvan character khunde mishe
 				filecount++;
 			}
 			fclose(playlist_file);
@@ -314,13 +335,13 @@ void text_ui_inititialize()
 
 int get_bytes(FILE *midi_file, int n)
 {
-	if(!(n >= 0 && n <= 4))
+	if(!(n >= 0 && n <= 4))		//Range yek int be surate byte
 		return -1;
     unsigned char ch;
     int i, return_val = 0;
     for(i=0; i<n; i++)
     {
-        fread(&ch, sizeof(unsigned char), 1, midi_file);
+        getuc(&ch, midi_file);
         return_val = (return_val << 8) | ch;
     }
     return return_val;
@@ -334,42 +355,16 @@ int get_vlv(FILE* midi_file, int* bytesRead) {
 	//....
 	int output = 0;
 	unsigned char ch = 0;
-	fread(&ch, sizeof(unsigned char), 1, midi_file); //Hadaghal yek byte ke has
+	getuc(&ch, midi_file); //Hadaghal yek byte ke has
 	*bytesRead += 1;
 	output = (output << 7) | (0x7f & ch);
 	while (ch >= 0x80) //MSB 1 hast pas edame bede va byte haye baadi ro ham bekhun
 	{
-		fread(&ch, sizeof(unsigned char), 1, midi_file);
+		getuc(&ch, midi_file);
 		*bytesRead += 1;
 		output = (output << 7) | (0x7f & ch);
 	}
 	return output;
-}
-
-double note_to_freq(int note){
-	//Note on, byte 1sh az 0-127 yek id note dare ke har kodum be yek frequency eshare mikone
-	//addad 0-127 migire va frequencsh ro ke az roo doc bardashte shode barmigardune
-
-	float freq[] = {8.18,8.66,9.18,9.72,10.30,10.91,
-	11.56,12.25,12.98,13.75,14.57,15.43,16.35,17.32,
-	18.35,19.45,20.60,21.83,23.12,24.50,25.96,27.50,
-	29.14,30.87,32.70,34.65,36.71,38.89,41.20,43.65,
-	46.25,49.00,51.91,55.00,58.27,61.74,65.41,69.30,
-	73.42,77.78,82.41,87.31,92.50,98.00,103.83,110.00,
-	116.54,123.47,130.81,138.59,146.83,155.56,164.81,
-	174.61,185.00,196.00,207.65,220.00,233.08,246.94,
-	261.63,277.18,293.66,311.13,329.63,349.23,369.99,
-	392.00,415.30,440.00,466.16,493.88,523.25,554.37,
-	587.33,622.25,659.26,698.46,739.99,783.99,830.61,
-	880.00,932.33,987.77,1046.50,1108.73,1174.66,
-	1244.51,1318.51,1396.91,1479.98,1567.98,1661.22,
-	1760.00,1864.66,1975.53,2093.00,2217.46,2349.32,
-	2489.02,2637.02,2793.83,2959.96,3135.96,3322.44,
-	3520.00,3729.31,3951.07,4186.01,4434.92,4698.64,
-	4978.03,5274.04,5587.65,5919.91,6271.93,6644.88,
-	7040.00,7458.62,7902.13,8372.02,8869.84,9397.27,
-	9956.06,10548.08,11175.30,11839.82,12543.85};
-    return freq[note];
 }
 
 int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *current_time, int *bytesRead) {
@@ -391,17 +386,17 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 	int status = 1, i;										//Status hamunie ke akhar return mishe, baraye end of tracke
 	unsigned char ch = 0;
 	char byte1, byte2;
-	fread(&ch, sizeof(unsigned char), 1, midi_file);
+	getuc(&ch, midi_file);
 	*bytesRead += 1;
 	if (ch < 0x80) {
 		// running status: command byte is previous one in data stream
 	} else {
 		// midi command byte
-		*command = ch;
-		fread(&ch, sizeof(unsigned char), 1, midi_file);
+		*command = ch;										//Chon running nist pas hamin jadide command byte mishe va data byte nist
+		getuc(&ch, midi_file);	//Yek byte dige ro begir va be onvan data byte1 azash estefade kon (data byte parametr evente dg)
 		*bytesRead += 1;
 	}
-	byte1 = ch;
+	byte1 = ch;												//Age running bashe khob data byte mishe dg vagarna hamun balatar yeki jadid gerefte shode
 	switch (*command & 0xf0) {
 		case 0x80:    // note-off
         case 0x81:	  //15 Channels exist
@@ -430,7 +425,7 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 			b++; //b hamun note-off hast ke shomorde mishe
 
 			int flag = 0;
-			fread(&ch, sizeof(unsigned char), 1, midi_file);
+			getuc(&ch, midi_file);
 			*bytesRead += 1;
 			byte2 = ch;
             for(i=0; i<tracks[t].count; i++) //Search kon tooye event haye ghabli
@@ -479,27 +474,28 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 			a++; //a hamun note-on hast ke shomorde mishe
 
             tracks[t].events[tracks[t].count].type = NOTE;                     //Farz ke in yek MISC hast ghalate va yek NOTE hast
+			tracks[t].events[tracks[t].count].note = byte1;					   //Note ro besurate RAW zakhire kon badan tabdil mishe
             tracks[t].events[tracks[t].count].frequency = note_to_freq(byte1); //Frequencish Moshakhas kon
             tracks[t].events[tracks[t].count].duration = -1;                   //-1 Yaeni set nashode va note offesh peyda nashode ke halate defaulte
             tracks[t].events[tracks[t].count].skipto = -1;                     //-1 Mesl duration
 			tracks[t].events[tracks[t].count].start_ticks = *current_time;     //Shoroe note be ticks ke baedan lazem mishe
 
-			fread(&ch, sizeof(unsigned char), 1, midi_file);
+			getuc(&ch, midi_file);
 			*bytesRead += 1;
 			byte2 = ch;
 			break;
 		case 0xA0:    // aftertouch
-			fread(&ch, sizeof(unsigned char), 1, midi_file);
+			getuc(&ch, midi_file);
 			*bytesRead += 1;
 			byte2 = ch;
 			break;
 		case 0xB0:    // continuous controller
-			fread(&ch, sizeof(unsigned char), 1, midi_file);
+			getuc(&ch, midi_file);
 			*bytesRead += 1;
 			byte2 = ch;
 			break;
 		case 0xE0:    // pitch-bend
-			fread(&ch, sizeof(unsigned char), 1, midi_file);
+			getuc(&ch, midi_file);
 			*bytesRead += 1;
 			byte2 = ch;
 			break;
@@ -513,10 +509,10 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 					break;
 				case 0xf7: //Hamun continuation event
 					{
-					ungetc(byte1, midi_file);
+					ungetc(byte1, midi_file);									//Running status (maximum optimization) :)
 					int length = get_vlv(midi_file, bytesRead);
 					for (i=0; i<length; i++) {
-						fread(&ch, sizeof(unsigned char), 1, midi_file);
+						getuc(&ch, midi_file);
 						*bytesRead += 1;
 						if (ch < 0x10) {
 
@@ -551,7 +547,8 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 				case 0xfd:
 					break;
 				case 0xfe:
-					printf("Error: command hanuz handle nashode!\n");
+					printf("Error: command hanuz handle nashode!\n");			//Nokte mohem ine ke vaghti inja error return 0 mizane to proccess midi ham be error
+																				//Mikhore va in kheili khube dg be moshkel nemikhorim! :)
 					return 0;
 					break;
 				case 0xff:	//FF ha kolan hamun meta event ha hastan
@@ -562,10 +559,10 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 
 						case 0x00:  // sequence number //Datash: ss ss
 						   {
-						   fread(&ch, sizeof(unsigned char), 1, midi_file);
+						   getuc(&ch, midi_file);
 						   *bytesRead += 1;
 						   int number = ch;
-						   fread(&ch, sizeof(unsigned char), 1, midi_file);
+						   getuc(&ch, midi_file);
 						   *bytesRead += 1;
 						   number = (number << 8) | ch;
 						   
@@ -577,7 +574,7 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 						case 0x20: // MIDI channel prefix
 						case 0x21: // MIDI port
 						   // display single-byte decimal number
-						   fread(&ch, sizeof(unsigned char), 1, midi_file);
+						   getuc(&ch, midi_file);
 						   *bytesRead += 1;
 
 						   printf("*Midi Port: %d\n", ch);
@@ -587,13 +584,13 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 						case 0x51: // Tempo
 						    {
 						    int number = 0;
-						    fread(&ch, sizeof(unsigned char), 1, midi_file);
+						    getuc(&ch, midi_file);
 							*bytesRead += 1;
 						    number = (number << 8) | ch;
-						    fread(&ch, sizeof(unsigned char), 1, midi_file);
+						    getuc(&ch, midi_file);
 							*bytesRead += 1;
 						    number = (number << 8) | ch;
-						    fread(&ch, sizeof(unsigned char), 1, midi_file);
+						    getuc(&ch, midi_file);
 							*bytesRead += 1;
 						    number = (number << 8) | ch;
                             tempo = 1000000.0 / number * 60.0;
@@ -605,39 +602,39 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 							break;
 
 						case 0x54: // SMPTE offset
-						    fread(&ch, sizeof(unsigned char), 1, midi_file); //h saat
+						    getuc(&ch, midi_file); //h saat
 							*bytesRead += 1;
-						    fread(&ch, sizeof(unsigned char), 1, midi_file); //m daghighe
+						    getuc(&ch, midi_file); //m daghighe
 							*bytesRead += 1;
-						    fread(&ch, sizeof(unsigned char), 1, midi_file); //s saniye
+						    getuc(&ch, midi_file); //s saniye
 							*bytesRead += 1;
-						    fread(&ch, sizeof(unsigned char), 1, midi_file); //f frame
+						    getuc(&ch, midi_file); //f frame
 							*bytesRead += 1;
-						    fread(&ch, sizeof(unsigned char), 1, midi_file); //sf subframe
+						    getuc(&ch, midi_file); //sf subframe
 							*bytesRead += 1;
 						    break;
 
 						case 0x58: // time signature
-						    fread(&ch, sizeof(unsigned char), 1, midi_file); //numerator
+						    getuc(&ch, midi_file); //numerator
 							*bytesRead += 1;
-						    fread(&ch, sizeof(unsigned char), 1, midi_file); //denominator power
+						    getuc(&ch, midi_file); //denominator power
 							*bytesRead += 1;
-						    fread(&ch, sizeof(unsigned char), 1, midi_file); //clocks per beat
+						    getuc(&ch, midi_file); //clocks per beat
 							*bytesRead += 1;
-						    fread(&ch, sizeof(unsigned char), 1, midi_file); //32nd notes per beat
+						    getuc(&ch, midi_file); //32nd notes per beat
 							*bytesRead += 1;
 						    break;
 
 						case 0x59: // key signature
-						    fread(&ch, sizeof(unsigned char), 1, midi_file); //Accidentals
+						    getuc(&ch, midi_file); //Accidentals
 							*bytesRead += 1;
-						    fread(&ch, sizeof(unsigned char), 1, midi_file); //Mode
+						    getuc(&ch, midi_file); //Mode
 							*bytesRead += 1;
 						    break;
 
 						case 0x01: printf("Text: ");// text
 							for (i=0; i<length; i++) {
-						      fread(&ch, sizeof(unsigned char), 1, midi_file);
+						      getuc(&ch, midi_file);
 							  *bytesRead += 1;
 						      printf("%c", ch);
 						   }
@@ -645,7 +642,7 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 						   break;
 						case 0x02: printf("Copyright: ");// copyright
 							for (i=0; i<length; i++) {
-						      fread(&ch, sizeof(unsigned char), 1, midi_file);
+						      getuc(&ch, midi_file);
 							  *bytesRead += 1;
 						      printf("%c", ch);
 						   }
@@ -653,7 +650,7 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 						   break;
 						case 0x03: printf("Track name: ");// track name
 							for (i=0; i<length; i++) {
-						      fread(&ch, sizeof(unsigned char), 1, midi_file);
+						      getuc(&ch, midi_file);
 							  *bytesRead += 1;
 						      printf("%c", ch);
 						   }
@@ -661,7 +658,7 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 						   break;
 						case 0x04: printf("Instrument name: ");// instrument name
 							for (i=0; i<length; i++) {
-						      fread(&ch, sizeof(unsigned char), 1, midi_file);
+						      getuc(&ch, midi_file);
 							  *bytesRead += 1;
 						      printf("%c", ch);
 						   }
@@ -669,7 +666,7 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 						   break;
 						case 0x05: printf("Lyric: ");// lyric
 							for (i=0; i<length; i++) {
-						      fread(&ch, sizeof(unsigned char), 1, midi_file);
+						      getuc(&ch, midi_file);
 							  *bytesRead += 1;
 						      printf("%c", ch);
 						   }
@@ -677,7 +674,7 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 						   break;
 						case 0x06: printf("Marker: ");// marker
 							for (i=0; i<length; i++) {
-						      fread(&ch, sizeof(unsigned char), 1, midi_file);
+						      getuc(&ch, midi_file);
 							  *bytesRead += 1;
 						      printf("%c", ch);
 						   }
@@ -685,7 +682,7 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 						   break;
 						case 0x07: printf("Cue point: ");// cue point
 							for (i=0; i<length; i++) {
-						      fread(&ch, sizeof(unsigned char), 1, midi_file);
+						      getuc(&ch, midi_file);
 							  *bytesRead += 1;
 						      printf("%c", ch);
 						   }
@@ -693,7 +690,7 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 						   break;
 						case 0x08: printf("Program name: ");// program name
 							for (i=0; i<length; i++) {
-						      fread(&ch, sizeof(unsigned char), 1, midi_file);
+						      getuc(&ch, midi_file);
 							  *bytesRead += 1;
 						      printf("%c", ch);
 						   }
@@ -701,7 +698,7 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 						   break;
 						case 0x09: printf("Device name: ");// device name
 						   for (i=0; i<length; i++) {
-						      fread(&ch, sizeof(unsigned char), 1, midi_file);
+						      getuc(&ch, midi_file);
 							  *bytesRead += 1;
 						      printf("%c", ch);
 						   }
@@ -709,7 +706,7 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 						   break;
 						default:
 						   for (i=0; i<length; i++) {
-						      fread(&ch, sizeof(unsigned char), 1, midi_file);
+						      getuc(&ch, midi_file);
 							  *bytesRead += 1;
 						      printf("%c", ch);
 						      if (ch < 0x10) {
@@ -729,9 +726,9 @@ int readMidiEvent(FILE* midi_file, int* command, track tracks[], int t, int *cur
 						//case 0x08: printf("*program name\n");        break; //Komak mikone karbar ba estefade az sakht afzar motefavet az narmafzar dorost estefade kone
 						//case 0x09: printf("*device name\n");         break; //Esm sakhtafzari ke baraye tolid file estefade shode
 						case 0x20: printf("*MIDI channel prefix\n"); break;
-						case 0x21: printf("*MIDI port\n");           break; //Kheili az system ha chand ta port midi daran ke bandwidth issue va 16 channel limit ro dor bezanan
-						case 0x51: printf("*tempo\n");               break; //In ke dige malume :) be time per beat hastesh
-						case 0x54: printf("*SMPTE offset\n");        break; //SMPTE offset ro neshun mide hr mn se fr ff
+						//case 0x21: printf("*MIDI port\n");           break; //Kheili az system ha chand ta port midi daran ke bandwidth issue va 16 channel limit ro dor bezanan
+						//case 0x51: printf("*tempo\n");               break; //In ke dige malume :) be time per beat hastesh
+						//case 0x54: printf("*SMPTE offset\n");        break; //SMPTE offset ro neshun mide hr mn se fr ff
 						case 0x58: printf("*time signature\n");      break; //Time signature ro neshun mide
 						case 0x59: printf("*key signature\n");       break; //Key signature ro neshun mide
 						case 0x7f: printf("*system exclusive\n");    break; //Manufacturer's ID code ro neshun mide, sequencer-specific info neshun mide
@@ -805,8 +802,48 @@ void play_tracks(track tracks[], int count)
     }
 }
 
+void save_tracks_asnotes(track tracks[], int count)
+{
+	FILE* note_file = fopen("NOTES.txt", "w");
+	printf("Note hai ke chap mishan note hae skip shode hastan!.\n");
+	int i = 0, j, k;
+    for(i=0; i<count; i++)								//Count ta track to har file midi hast
+    {
+        for(j=0; j< tracks[i].count; j++)				//Har kudum uni tracks[i].count ta track daran
+        {
+            if(tracks[i].events[j].type == NOTE)
+            {
+				if(tracks[i].events[j].duration > 0 && tracks[i].events[j].note >= 12 && tracks[i].events[j].note <= 119)
+				{
+					fprintf(note_file, "-N %s -d %d\n", note_to_name(tracks[i].events[j].note), (int)tracks[i].events[j].duration);
+					fprintf(note_file,"-n ");
+
+					/* Skip type 2 (Note haye daghighan hamzaman skip mishan!)
+					double timepassed = 0;
+					k = j+1;
+					while((k != tracks[i].count - 1) && timepassed == 0 && tracks[i].events[k].type != NOTE) 
+					//Ta zamani ke be akharin event narsidi va zaman separi shode 0 hast na be note narsidi edame bede va zaman ro behesab
+					{
+						timepassed += tracks[i].events[k].deltaTime_ms;   //Hesab kardan zaman
+						k++;											  //Edame
+					}
+					if(timepassed == 0 && tracks[i].events[k].type == NOTE && tracks[i].events[k].note >= 12 && tracks[i].events[k].note <= 119)
+					{
+						fprintf(note_file, "-N %s -d %d\n", note_to_name(tracks[i].events[j].note), (int)tracks[i].events[j].duration); //Note skip shode ro chap kon
+						j = k+1;																				 						//Be event bade un note skip kon
+					}
+					*/
+
+				}
+            }
+        }
+    }
+	fclose(note_file);
+}
+
 int proccess_midi_file(char file_name[])
 {
+	int returnval;
 	/*========INITIALIZATION========*/
 	a = 0; //Reset baraye file haye baadi
 	b = 0;
@@ -815,12 +852,23 @@ int proccess_midi_file(char file_name[])
 	/*========INITIALIZATION========*/
 
 	printf("\n========%s==> Dar hale navakhtan file midi ba name %s\n", KCYN, file_name);
-    
-	FILE *midi_file;
-    midi_file = fopen(file_name, "rb");
+
+    FILE *midi_file = fopen(file_name, "rb");
+	if(midi_file == NULL)
+	{
+		printf("(.________.)\n");
+		perror("Error opening file: ");
+		return -85;
+	}
     unsigned char buffer[5];
-    fread(buffer, sizeof(unsigned char), 4, midi_file);
+    returnval = fread(buffer, sizeof(unsigned char), 4, midi_file);
     buffer[4] = '\0';
+	if(returnval < 4)
+	{
+			printf("Error: error reading bytes while trying to read MThd! (probably end of file)\n");
+			fclose(midi_file);
+			return -90;
+	}
 	
 	if(strcmp(buffer, "MThd") != 0)
 	{
@@ -835,38 +883,38 @@ int proccess_midi_file(char file_name[])
 
     unsigned char ch;
     int hlength = 0;
-    fread(&ch, sizeof(unsigned char), 1, midi_file);
+    getuc(&ch, midi_file);
     hlength = (hlength << 8) | ch;
-    fread(&ch, sizeof(unsigned char), 1, midi_file);
+    getuc(&ch, midi_file);
     hlength = (hlength << 8) | ch;
-    fread(&ch, sizeof(unsigned char), 1, midi_file);
+    getuc(&ch, midi_file);
     hlength = (hlength << 8) | ch;
-    fread(&ch, sizeof(unsigned char), 1, midi_file);
+    getuc(&ch, midi_file);
     hlength = (hlength << 8) | ch;
     printf("*Length:%d\n", hlength);
 
     //Read bytes of header type
     
 	int htype = 0;
-    fread(&ch, sizeof(unsigned char), 1, midi_file);
+    getuc(&ch, midi_file);
     htype = (htype << 8) | ch;
-    fread(&ch, sizeof(unsigned char), 1, midi_file);
+    getuc(&ch, midi_file);
     htype = (htype << 8) | ch;
     printf("*File type: %d\n", htype);
     
 	//Read bytes of track count
     
 	int ntracks = 0;
-    fread(&ch, sizeof(unsigned char), 1, midi_file);
+    getuc(&ch, midi_file);
     ntracks = (ntracks << 8) | ch;
-    fread(&ch, sizeof(unsigned char), 1, midi_file);
+    getuc(&ch, midi_file);
     ntracks = (ntracks << 8) | ch;
     printf("*Tracks count: %d\n", ntracks);
     
 	//Read bytes of division
     
 	division = 0;
-    fread(&ch, sizeof(unsigned char), 1, midi_file);
+    getuc(&ch, midi_file);
     division = (division << 8) | ch;
     int bits;
     printf("*Division:\nBinary Representation of first byte:");
@@ -892,14 +940,14 @@ int proccess_midi_file(char file_name[])
         printf("Timecode: ");
         //ch &= ~(1UL << 7);
         printf("%d fps", division);
-        fread(&ch, sizeof(unsigned char), 1, midi_file);
+        getuc(&ch, midi_file);
         printf("/ %d subdivision per frame", ch);
     }
     else
     {
 		//In timing khube
         printf("\nMetrical timing: ");
-        fread(&ch, sizeof(unsigned char), 1, midi_file);
+        getuc(&ch, midi_file);
         division = (division << 8) | ch;
         printf("%d ppqn\n", division);
     }
@@ -910,21 +958,38 @@ int proccess_midi_file(char file_name[])
 	{
 		printf("Format file dade shode support nemishavad!");
 	}
-	else
+	else if(htype == 0 || htype == 1)
 	{
-	
+	//Format support mishe!
+
     track tracks[ntracks];
 
     printf("==> Dar hale khandan track ha...\n");
+
     int i, j, count = 0;
     for (i=0; i<ntracks; i++) {
 
     	tracks[i].count = 0;
 
-        fread(buffer, sizeof(unsigned char), 4, midi_file);
+        returnval = fread(buffer, sizeof(unsigned char), 4, midi_file);
+		buffer[4] = '\0';
+		if(returnval < 4)
+		{
+			printf("Error: error reading bytes while trying to read MTrk! (probably end of file)\n");
+			fclose(midi_file);
+			return -80;
+		}
         while(strcmp(buffer, "MTrk") != 0)
         {
-            fread(buffer, sizeof(unsigned char), 4, midi_file);
+            returnval = fread(buffer, sizeof(unsigned char), 4, midi_file);
+			buffer[4] = '\0';
+			//fread read count of items from IO stream, returns numbers of items successfuly read
+			if(returnval < 4)
+			{
+				printf("Error: error reading bytes while trying to read MTrk! (probably end of file)\n");
+				fclose(midi_file);
+				return -80;
+			}
         }
         buffer[4] = '\0';
         //Finally a midi track
@@ -959,16 +1024,29 @@ int proccess_midi_file(char file_name[])
 	if(a == 0 || b == 0)
 	{
 		printf("ERROR: Midi files with 0 note-on or 0 note-off events cannot be played!\n");
+		fclose(midi_file);
 		return -63;
 	}
 	else
 	{
 		printf("\n==>Dar hal pakhsh track ha\n");
 
-    	play_tracks(tracks, ntracks);
+    	play_tracks(tracks, ntracks);					//In play ghashang tar az play ba phase 1 hast vali har dosh khube ziad fargh nmikone
 
 		printf("\n==>Navakhtan track ha tamum shod!\n");
+		
+		printf("\n==>Dar hale save kardan note ha\n");
+
+		save_tracks_asnotes(tracks, ntracks);
+		
+		printf("\n==>Save kardan note ha tamum shod\n");
+
+		//playnotes();
 		}
+	}
+	else
+	{
+		printf("Unknown format!\n");
 	}
     fclose(midi_file);
 }
@@ -1034,3 +1112,227 @@ int abeep(double frequency, double duration)
     return 0;
 }
 /*========BEEP========*/
+
+/*========Converters========*/
+
+const char* note_to_name(int note){
+    if(note==12){return "C0"; }
+    if(note==13){return "Cs0"; }
+    if(note==14){return "D0"; }
+    if(note==15){return "Ds0"; }
+    if(note==16){return "E0"; }
+    if(note==17){return "F0"; }
+    if(note==18){return "Fs0"; }
+    if(note==19){return "G0"; }
+    if(note==20){return "Gs0"; }
+    if(note==21){return "A0"; }
+    if(note==22){return "As0"; }
+    if(note==23){return "B0"; }
+    if(note==24){return "C1"; }
+    if(note==25){return "Cs1"; }
+    if(note==26){return "D1"; }
+    if(note==27){return "Ds1"; }
+    if(note==28){return "E1"; }
+    if(note==29){return "F1"; }
+    if(note==30){return "Fs1"; }
+    if(note==31){return "G1"; }
+    if(note==32){return "Gs1"; }
+    if(note==33){return "A1"; }
+    if(note==34){return "As1"; }
+    if(note==35){return "B1"; }
+    if(note==36){return "C2"; }
+    if(note==37){return "Cs2"; }
+    if(note==38){return "D2"; }
+    if(note==39){return "Ds2"; }
+    if(note==40){return "E2"; }
+    if(note==41){return "F2"; }
+    if(note==42){return "Fs2"; }
+    if(note==43){return "G2"; }
+    if(note==44){return "Gs2"; }
+    if(note==45){return "A2"; }
+    if(note==46){return "As2"; }
+    if(note==47){return "B2"; }
+    if(note==48){return "C3"; }
+    if(note==49){return "Cs3"; }
+    if(note==50){return "D3"; }
+    if(note==51){return "Ds3"; }
+    if(note==52){return "E3"; }
+    if(note==53){return "F3"; }
+    if(note==54){return "Fs3"; }
+    if(note==55){return "G3"; }
+    if(note==56){return "Gs3"; }
+    if(note==57){return "A3"; }
+    if(note==58){return "As3"; }
+    if(note==59){return "B3"; }
+    if(note==60){return "C4"; }
+    if(note==61){return "Cs4"; }
+    if(note==62){return "D4"; }
+    if(note==63){return "Ds4"; }
+    if(note==64){return "E4"; }
+    if(note==65){return "F4"; }
+    if(note==66){return "Fs4"; }
+    if(note==67){return "G4"; }
+    if(note==68){return "Gs4"; }
+    if(note==69){return "A4"; }
+    if(note==70){return "As4"; }
+    if(note==71){return "B4"; }
+    if(note==72){return "C5"; }
+    if(note==73){return "Cs5"; }
+    if(note==74){return "D5"; }
+    if(note==75){return "Ds5"; }
+    if(note==76){return "E5"; }
+    if(note==77){return "F5"; }
+    if(note==78){return "Fs5"; }
+    if(note==79){return "G5"; }
+    if(note==80){return "Gs5"; }
+    if(note==81){return "A5"; }
+    if(note==82){return "As5"; }
+    if(note==83){return "B5"; }
+    if(note==84){return "C6"; }
+    if(note==85){return "Cs6"; }
+    if(note==86){return "D6"; }
+    if(note==87){return "Ds6"; }
+    if(note==88){return "E6"; }
+    if(note==89){return "F6"; }
+    if(note==90){return "Fs6"; }
+    if(note==91){return "G6"; }
+    if(note==92){return "Gs6"; }
+    if(note==93){return "A6"; }
+    if(note==94){return "As6"; }
+    if(note==95){return "B6"; }
+    if(note==96){return "C7"; }
+    if(note==97){return "Cs7"; }
+    if(note==98){return "D7"; }
+    if(note==99){return "Ds7"; }
+    if(note==100){return "E7"; }
+    if(note==101){return "F7"; }
+    if(note==102){return "Fs7"; }
+    if(note==103){return "G7"; }
+    if(note==104){return "Gs7"; }
+    if(note==105){return "A7"; }
+    if(note==106){return "As7"; }
+    if(note==107){return "B7"; }
+    if(note==108){return "C8"; }
+    if(note==109){return "Cs8"; }
+    if(note==110){return "D8"; }
+    if(note==111){return "Ds8"; }
+    if(note==112){return "E8"; }
+    if(note==113){return "F8"; }
+    if(note==114){return "Fs8"; }
+    if(note==115){return "G8"; }
+    if(note==116){return "Gs8"; }
+    if(note==117){return "A8"; }
+    if(note==118){return "As8"; }
+    if(note==119){return "B8"; }
+
+}
+
+double note_to_freq(int note){
+	//Note on, byte 1sh az 0-127 yek id note dare ke har kodum be yek frequency eshare mikone
+	//addad 0-127 migire va frequencsh ro ke az roo doc bardashte shode barmigardune
+
+	float freq[] = {8.18,8.66,9.18,9.72,10.30,10.91,
+	11.56,12.25,12.98,13.75,14.57,15.43,16.35,17.32,
+	18.35,19.45,20.60,21.83,23.12,24.50,25.96,27.50,
+	29.14,30.87,32.70,34.65,36.71,38.89,41.20,43.65,
+	46.25,49.00,51.91,55.00,58.27,61.74,65.41,69.30,
+	73.42,77.78,82.41,87.31,92.50,98.00,103.83,110.00,
+	116.54,123.47,130.81,138.59,146.83,155.56,164.81,
+	174.61,185.00,196.00,207.65,220.00,233.08,246.94,
+	261.63,277.18,293.66,311.13,329.63,349.23,369.99,
+	392.00,415.30,440.00,466.16,493.88,523.25,554.37,
+	587.33,622.25,659.26,698.46,739.99,783.99,830.61,
+	880.00,932.33,987.77,1046.50,1108.73,1174.66,
+	1244.51,1318.51,1396.91,1479.98,1567.98,1661.22,
+	1760.00,1864.66,1975.53,2093.00,2217.46,2349.32,
+	2489.02,2637.02,2793.83,2959.96,3135.96,3322.44,
+	3520.00,3729.31,3951.07,4186.01,4434.92,4698.64,
+	4978.03,5274.04,5587.65,5919.91,6271.93,6644.88,
+	7040.00,7458.62,7902.13,8372.02,8869.84,9397.27,
+	9956.06,10548.08,11175.30,11839.82,12543.85};
+    return freq[note];
+}
+
+/*========Converters========*/
+
+void playnotes()
+{
+    int i;
+    char str[1000];
+    FILE *notes_file = fopen("NOTES.txt", "r");
+	if(notes_file == NULL)
+	{
+		perror("Error opening NOTES.txt:");
+		exit(1);
+	}
+    //Read until you reach a #define line then read values and beep
+    while(fscanf(notes_file, "%s", str) != EOF)
+    {
+        if(strcmp(str, "-N") == 0)
+        {
+            char note[4] = "";
+
+            fscanf(notes_file, "%s", note);
+
+            //Replace all # with s
+            for(i=0; i<strlen(note); i++)
+            {
+                if(note[i] == '#')
+                {
+                    note[i] = 's';
+                }
+            }
+
+            char dummy[4] = "";
+
+            //-d is dummy string (garbage)
+
+            fscanf(notes_file, "%s", dummy);
+
+            int length = 0;
+
+            fscanf(notes_file, "%d", &length);
+            beep(getfrequency(note), length);
+        }
+    }
+    fclose(notes_file);
+}
+
+float getfrequency(char target_note[])
+{
+    char str[1000];
+    FILE *header_file;
+    header_file = fopen("MIDI_header_complete_it_yourself.h","r");
+    //Read until you reach a #define line then read values and compare
+    while(fscanf(header_file, "%s", str) != EOF)
+    {
+        if(strcmp(str, "#define") == 0)
+        {
+
+            char note[4] = "";
+
+            fscanf(header_file, "%s", note);
+
+            float freq;
+
+            fscanf(header_file, "%f", &freq);
+
+            if(strcmp(note, target_note) == 0)
+            {
+                return freq;
+            }
+        }
+    }
+    fclose(header_file);
+}
+
+void getuc(char* ch, FILE* midi_file)
+{
+	int returnval;
+	returnval = fread(ch, sizeof(unsigned char), 1, midi_file);
+	if(returnval != 1)
+	{
+		printf("Error reading byte from midi file");
+		exit(-68);
+	}
+}	//Get unsigned char, Error proof! :)
